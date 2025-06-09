@@ -3,7 +3,7 @@
 Source: https://github.com/sherlock-audit/2025-05-layeredge-judging/issues/83 
 
 ## Found by 
-MysteryAuditor, X77, future, rudhra1749, slavina
+MysteryAuditor, X77, future, jkoppel, newspacexyz, rudhra1749, slavina, wickie
 
 ### Summary
 
@@ -163,287 +163,272 @@ Now, paste the following POC in the staking test contract:
 
 _No response_
 
-# Issue H-2: Incorrect update of tier give permanent position to some users. 
+## Discussion
 
-Source: https://github.com/sherlock-audit/2025-05-layeredge-judging/issues/287 
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Layer-Edge/edgen-staking/pull/7
+
+
+
+
+# Issue H-2: When `stakerCountInTree` Increases, Some Users May Receive Less Interest 
+
+Source: https://github.com/sherlock-audit/2025-05-layeredge-judging/issues/230 
 
 ## Found by 
-Cybrid, Hecok, Hurricane, Pablo, X77, benjamin\_0923, durov, future, jkoppel, kazan, lukris02, montecristo, newspacexyz, rudhra1749, shiazinho, slavina, t0x1c, wickie
+Cybrid, Hecok, Hurricane, Pablo, X77, benjamin\_0923, durov, future, jkoppel, kazan, lukris02, montecristo, rudhra1749, shiazinho, slavina, t0x1c
+
+### Summary
+In the `_checkBoundariesAndRecord` function, when `stakerCountInTree` increases, a user in tier 3 is not promoted to tier 2 when it should be.
+
+### Root Cause
+The root cause is that when `stakerCountInTree` increases, users who need to transition from tier 3 to tier 2 are not properly updated.
+At this point, the ranking of `new_t1 + new_t2` could be moved from tier 3 to tier 2. 
+However, in line 897, only the ranking of `old_t1 + old_t2` is updated instead of considering `new_t1 + new_t2`.
+
+https://github.com/sherlock-audit/2025-05-layeredge/tree/main/edgen-staking/src/stake/LayerEdgeStaking.sol#L896
+```solidity
+    function _checkBoundariesAndRecord(bool isRemoval) internal {
+        ...
+        // Tier 2 boundary handling
+        if (new_t1 + new_t2 > 0) {
+            if (new_t2 != old_t2) {
+                // Need to update all users between the old and new tier 2 boundaries
+                uint256 old_boundary = old_t1 + old_t2;
+                uint256 new_boundary = new_t1 + new_t2;
+
+                if (new_boundary > old_boundary) {
+                    // Promotion case: update all users from old_boundary+1 to new_boundary
+                    for (uint256 rank = old_boundary + 1; rank <= new_boundary; rank++) {
+                        _findAndRecordTierChange(rank, n);
+                    }
+                } else {
+                    // Demotion case: update all users from new_boundary+1 to old_boundary
+                    for (uint256 rank = new_boundary + 1; rank <= old_boundary; rank++) {
+                        _findAndRecordTierChange(rank, n);
+                    }
+                }
+            }
+            // Handle case where Tier 2 count stays the same
+            else if (isRemoval) {
+                _findAndRecordTierChange(new_t1 + new_t2, n);
+896:        } else if (!isRemoval) {
+                _findAndRecordTierChange(old_t1 + old_t2, n);
+            }
+        }
+    }
+```
+
+### Internal pre-conditions
+N/A
+
+### External pre-conditions
+N/A
+
+### Attack Path
+Consider the scenario where `oldStakerCountInTree = 14` and `newStakerCountInTree = 15`. 
+The tier distribution changes from (2, 4, 8) to (3, 4, 8), but the seventh-ranked user's tier does not change from tier 3 to tier 2.
+
+### PoC
+https://github.com/sherlock-audit/2025-05-layeredge/tree/main/edgen-staking/test/stake/LayerEdgeStakingTest.t.sol
+```solidity
+    function toString(uint256 value) internal pure returns (string memory result) {
+        assembly {
+            result := add(mload(0x40), 0x80)
+            mstore(0x40, add(result, 0x20)) // Allocate memory.
+            mstore(result, 0) // Zeroize the slot after the string.
+            let end := result // Cache the end of the memory to calculate the length later.
+            let w := not(0) // Tsk.
+            for { let temp := value } 1 {} {
+                result := add(result, w) // `sub(result, 1)`.
+                mstore8(result, add(48, mod(temp, 10)))
+                temp := div(temp, 10) // Keep dividing `temp` until zero.
+                if iszero(temp) { break }
+            }
+            let n := sub(end, result)
+            result := sub(result, 0x20) // Move the pointer 32 bytes back to make room for the length.
+            mstore(result, n) // Store the length.
+        }
+    }
+    function test_LayerEdgeStaking_checkBoundariesAndRecord() public {
+        vm.startPrank(admin);
+        uint256 userAmount = 10_000 * 1e18;
+        address[20] memory users;
+        for (uint256 i = 0; i < 20; i++) {
+            users[i] = makeAddr(string(abi.encodePacked("users", toString(i)))); 
+            token.transfer(users[i], userAmount);
+        } 
+        vm.stopPrank();
+        for (uint256 i = 1; i <= 15; i++) {
+            vm.startPrank(users[i]);
+            token.approve(address(staking), MIN_STAKE);
+            staking.stake(MIN_STAKE);
+            vm.stopPrank();
+        }
+        address user = users[7];
+        vm.warp(block.timestamp + 365 days);
+        uint256 userAPY = staking.getUserAPY(user);
+        vm.startPrank(user);
+        uint256 beforeUserAmount = token.balanceOf(user);
+        staking.claimInterest();
+        uint256 afterUserAmount = token.balanceOf(user);
+        console2.log("Procotol User   APY : %d", userAPY);
+        console2.log("Actual Received APY : %d", 100e18 * (afterUserAmount - beforeUserAmount) / MIN_STAKE);
+        vm.stopPrank();
+    }
+```
+forge test --match-test "test_LayerEdgeStaking_checkBoundariesAndRecord" -vv
+Result:
+```bash
+Ran 1 test for test/stake/LayerEdgeStakingTest.t.sol:LayerEdgeStakingTest
+[PASS] test_LayerEdgeStaking_checkBoundariesAndRecord() (gas: 6634274)
+Logs:
+  Procotol User   APY : 35000000000000000000
+  Actual Received APY : 20000000000000000000
+```
+After mitigation, Result:
+```bash
+Ran 1 test for test/stake/LayerEdgeStakingTest.t.sol:LayerEdgeStakingTest
+[PASS] test_LayerEdgeStaking_checkBoundariesAndRecord() (gas: 6956510)
+Logs:
+  Procotol User   APY : 35000000000000000000
+  Actual Received APY : 35000000000000000000
+```
+### Impact
+1. Some Users receive less interest.
+
+### Mitigation
+https://github.com/sherlock-audit/2025-05-layeredge/tree/main/edgen-staking/src/stake/LayerEdgeStaking.sol#L897
+```diff
+        if (new_t1 + new_t2 > 0) {
+            if (new_t2 != old_t2) {
+                // Need to update all users between the old and new tier 2 boundaries
+                uint256 old_boundary = old_t1 + old_t2;
+                uint256 new_boundary = new_t1 + new_t2;
+
+                if (new_boundary > old_boundary) {
+                    // Promotion case: update all users from old_boundary+1 to new_boundary
+                    for (uint256 rank = old_boundary + 1; rank <= new_boundary; rank++) {
+                        _findAndRecordTierChange(rank, n);
+                    }
+                } else {
+                    // Demotion case: update all users from new_boundary+1 to old_boundary
+                    for (uint256 rank = new_boundary + 1; rank <= old_boundary; rank++) {
+                        _findAndRecordTierChange(rank, n);
+                    }
+                }
+            }
+            // Handle case where Tier 2 count stays the same
+            else if (isRemoval) {
+                _findAndRecordTierChange(new_t1 + new_t2, n);
+            } else if (!isRemoval) {
+897:            _findAndRecordTierChange(old_t1 + old_t2, n);
++               _findAndRecordTierChange(new_t1 + new_t2, n);
+            }
+        }
+```
+
+# Issue M-1: stakerTierHistory is an unbound array that can be extended such that a user's funds are permamently lost 
+
+Source: https://github.com/sherlock-audit/2025-05-layeredge-judging/issues/194 
+
+## Found by 
+0x15, AestheticBhai, Artur, Bigsam, Boy2000, Cybrid, Drynooo, Galturok, KobbyEugene, Ollam, PersonaNormale, X77, ZafiN, algiz, eLSeR17, gesha17, illoy\_sci, jkoppel, lukris02, novaman33, ptsanev, sil3th, t0x1c, tjonair, tobi0x18, wickie
 
 ### Summary
 
-The `LayerEdgeStaking.sol` contract uses the FCFS (First-Come-First-Served) model to give the earliest stakers the highest APYs. There are three tiers Tier 1, Tier 2 And Tier 3, with the distribution of 20%, 30% and 50% of stakers in each tier, and in order of Highest APY to Lowest. Users can only enter Tier 1 and Tier 2 if they at least stake the [`MIN_STAKE`](https://github.com/sherlock-audit/2025-05-layeredge/blob/main/edgen-staking/src/stake/LayerEdgeStaking.sol#L144) amount and they are among the first 20% or 30% of stakers. Everyone else will be in Tier 3 but only users who staked the `MIN_STAKE` amount can move up to Tier 2 or 1 from Tier 3 when users in front of them unstake. As users stake and unstake they're moved from tier to tier based on their rank(i.e how early they staked in respective of other users). This is done via `LayerEdgeStaking.sol::_checkBoundariesAndRecord()`, which is called as when users in the system stake or unstake. 
-
-The function works fine when, 
-    1. a user from Tier 3 move to Tier 2.    
-    2. a user from Tier 3 move to Tier 2 AND another user move from Tier 2 to Tier 1.
-
-However, when only a single user move, from Tier 2 to Tier 1, the function fails to fill the gap of Tier 2 with a user from Tier 3. This is corrected when a user stakes or unstakes (triggering `_checkBoundariesAndRecord()`), but this user stays in Tier 2 even when all the users who staked after him unstakes.
-
-The _checkBoundariesAndRecord() is responsible for handling the boundries of Tiers and updating the users' tiers based on the number of stakers. 
-Cases where,
-1. Both Tier 1 and Tier 2 boundry changes
-2. Tier 2 boundry changes, are handled correctly.
-
-However, when ONLY Tier 1 boundry changes, the function updates the tiers of the users at the boundry incorrectly.
-For example, based on the tier distribution of 20%, 30%, 50% in Tier 1, 2 and 3 respectively,
-
-1. At 14 users, Tier 1 HAS 2 users (U1, U2), Tier 2 HAS 4 users (U3, U4, U5, U6) and Tier 3 HAS 8 users (U7-U14).  
-2. A user stakes and is put in Tier 3.
-3. At 15 users, Tier 1 SHOULD HAVE 3 users (U1, U2, U3), Tier 2 SHOULD HAVE 4 users (U4, U5, U6, U7) and Tier 3 SHOULD HAVE 8 users (U8-U15).
-
-But the function handles this case incorrectly and in reality, 
-At 15 users, Tier 1 HAS 3 users (U1, U2, U3), Tier 2 HAS 3 users (U4, U5, U6) and Tier 3 HAS 9 users (U7, U8-U15).
-This is because, the function handles this case in reverse. 
-
-At the end of  [_checkBoundariesAndRecord()](https://github.com/sherlock-audit/2025-05-layeredge/blob/main/edgen-staking/src/stake/LayerEdgeStaking.sol#L894-L899), when handling tier 2 boundries, the removal cases are handled in reverse.  
-
-```solidity
-    function _checkBoundariesAndRecord(bool isRemoval) internal {
-        ....
-            //Handle case where Tier 2 count stays the same
-            else if (isRemoval) {
-                _findAndRecordTierChange(new_t1 + new_t2, n);
-@>          } else if (!isRemoval) {
-                _findAndRecordTierChange(old_t1 + old_t2, n);
-            }
-        }
-    }
-```
-
-So in the example above, isRemoval == false, new_t1 = 3, new_t2 = 4, old_t1 = 2, old_t2 = 4 and n = 15.
-The [_findAndRecordTierChange()](https://github.com/sherlock-audit/2025-05-layeredge/blob/main/edgen-staking/src/stake/LayerEdgeStaking.sol#L907) is called with `6` as the input `rank`. This means, the rank change is excuted on U6, but he is already in Tier 2 so the _recordTierChange() does nothing. 
-In reality, the rank change should be executed on U7, who moved to Tier 2 from Tier 3, because there is a gap in Tier 2, caused by U3 moving to Tier 1.
-
-```solidity
-    function _findAndRecordTierChange(uint256 rank, uint256 _stakerCountInTree) internal {
-        uint256 joinIdCross = stakerTree.findByCumulativeFrequency(rank);
-        address userCross = stakerAddress[joinIdCross];
-        uint256 _rank = stakerTree.query(joinIdCross);
-        Tier toTier = _computeTierByRank(_rank, _stakerCountInTree);
-        _recordTierChange(userCross, toTier);
-    }
-```
-
-The [_computeTierByRank()](https://github.com/sherlock-audit/2025-05-layeredge/blob/main/edgen-staking/src/stake/LayerEdgeStaking.sol#L921) finds the users Tier based on his rank and [_recordTierChange()](https://github.com/sherlock-audit/2025-05-layeredge/blob/main/edgen-staking/src/stake/LayerEdgeStaking.sol#L817) updates it.
-
-```solidity 
-    function _computeTierByRank(uint256 rank, uint256 totalStakers) internal pure returns (Tier) {
-        if (rank == 0 || rank > totalStakers) return Tier.Tier3; 
-        (uint256 tier1Count, uint256 tier2Count,) = getTierCountForStakerCount(totalStakers);
-        if (rank <= tier1Count) return Tier.Tier1;
-        else if (rank <= tier1Count + tier2Count) return Tier.Tier2;
-        return Tier.Tier3;
-    }
-
-    function _recordTierChange(address user, Tier newTier) internal {
-        Tier old = Tier.Tier3;
-        if (stakerTierHistory[user].length > 0) {
-            old = stakerTierHistory[user][stakerTierHistory[user].length - 1].to;
-        }
-        if (
-            stakerTierHistory[user].length > 0
-                && stakerTierHistory[user][stakerTierHistory[user].length - 1].to == newTier
-        ) return;
-        uint256 currentTime = block.timestamp;
-        stakerTierHistory[user].push(TierEvent({from: old, to: newTier, timestamp: currentTime}));
-        users[user].lastTimeTierChanged = currentTime;
-
-        emit TierChanged(user, newTier);
-    }
-```
-
-If a new staker enters, U7 is correctly placed in Tier 2.
-At 16 users, Tier 1 HAS 3 users (U1, U2, U3), Tier 2 HAS 4 users (U4, U5, U6, U7) and Tier 3 HAS 9 users (U8-U16).
-
-However, in this case, U7 gains a permanent position in Tier2. Even after U8-16 unstakes, he is still in Tier 2.
-At 7 users, Tier 1 SHOULD HAVE 1 user(U1), Tier 2 SHOULD HAVE 2 users (U2, U3) Tier 3 SHOULD HAVE 4 users. (U4, U5, U6, U7)
-In reality, Tier 1 HAS 1 user(U1), Tier 2 HAS 3 users (U2, U3, U7), Tier 3 HAS 3 users. (U4, U5, U6).
-
-Interests are calculated and updated via [calculateUnclaimedInterest](https://github.com/sherlock-audit/2025-05-layeredge/blob/main/edgen-staking/src/stake/LayerEdgeStaking.sol#L397), which uses `stakerTierHistory`. 
-If the user's history is wrong, (Tier 3 -> Tier 2, instead of Tier 3 -> Tier 2 -> Tier 3), they will get interests based on the wrong history.
+In LayerEdgeStaking.sol, an stakerTierHistory is used for each user to track their tier history in a boundless array. This array is iterated through every time a user does any action with the protocol in calculateUnclaimedInterest(), which is called as part of _updateInterest(), which is called as part of every user action. This array is iterated over in its entirety every time this happens, which can make any user operation eventually cost more gas than is permitted in a block, permanently locking the user's tokens in the contract.
 
 ### Root Cause
 
-In [_checkBoundariesAndRecord()](https://github.com/sherlock-audit/2025-05-layeredge/blob/main/edgen-staking/src/stake/LayerEdgeStaking.sol#L894-L899), when handling tier 2 boundries, the removal cases are handled in reverse.  
+In [calculateUnclaimedInterest()](https://github.com/sherlock-audit/2025-05-layeredge/blob/main/edgen-staking/src/stake/LayerEdgeStaking.sol#L419-L426), the user's tier history is iterated through in its entirety.
 
 ```solidity
-    function _checkBoundariesAndRecord(bool isRemoval) internal {
-        ....
-            //Handle case where Tier 2 count stays the same
-            else if (isRemoval) {
-                _findAndRecordTierChange(new_t1 + new_t2, n);
-@>          } else if (!isRemoval) {
-                _findAndRecordTierChange(old_t1 + old_t2, n);
+        for (uint256 i = 0; i < userTierHistory.length; i++) {
+            if (userTierHistory[i].timestamp <= fromTime) {
+                currentTier = userTierHistory[i].to;
+                relevantStartIndex = i;
+            } else {
+                break;
             }
         }
-    }
 ```
+
+There is another loop which goes through the array starting at a given index:
+
+```solidity
+        for (uint256 i = relevantStartIndex + 1; i < userTierHistory.length; i++) {
+```
+
+This index is added to every time the user changes tier, which can happen because of other users staking and unstaking tokens. This happens in _recordTierChange:
+
+```solidity
+        stakerTierHistory[user].push(TierEvent({from: old, to: newTier, timestamp: currentTime}));
+```
+
+This means that if a user sticks around in the staking pool long enough, organic user activity can lock his funds permanently. Additionally, an attacker can abuse the system by staking and unstaking small amounts over and over again to increase the length of a user's tier history array.
+
+Additionally, every time the user's tier is iterated through the system, it also iterates through every apy change for that tier. This has a multiplicative effect on gas consumption, such that every apy change in the protocol's history will drastically decrease the number of tier changes a user needs to experience to be locked out of his funds.
 
 ### Internal Pre-conditions
 
-None
+The affected user must be staked and not be first in line.
 
 ### External Pre-conditions
 
-ONLY Tier 1's boundry should be increased. 
+No external preconditions.
 
 ### Attack Path
 
-None, logical error. 
+1. A user stakes a position
+2. Whether because of organic activity or an attack, the user crosses the tier boundary several times
+3. The user can now no longer withdraw
 
 ### Impact
 
-This occurs everytime when ONLY Tier 1 boundry is increased. If no new stakers enter, the user who should be in Tier 2 is stuck in Tier 3, missing out on Tier 2 APYs. However, if new stakers enters, This particular user gains permanent position in Tier 2. In our POC, Alice gets Tier 2 APY, when she should be gettin Tier 3 APY. 
-This issue breaks the invariants
-
-    Tier distribution correctness. 
-Some users' tiers are not updated accordingly (users joining as 7th, 12th, 17th, 22th, 27th, ... staker). If there is no new staker to bump them up the ranking, they will get Tier 3 APY instead of Tier 2's. If they are bumped, they will get permanent Tier 2 APY even when they shold be gettin Tier 3's.
-
-    First-come-first-serve (FCFS) ordering.
- Such users will unfairly get more APY and the user who staked before them will be demoted first before them.
+The affected user loses all staked funds and can never withdraw.
 
 ### PoC
 
-Paste this test in src/test/stake/TierBoundryAndInterestTest.t.sol.
-
-Prerequisites: 
-1. import OZ's [String.sol](https://github.com/OpenZeppelin/openzeppelin-contracts/blob/441b1c1c5b909498ca6206a84445ee516067e7fc/contracts/utils/Strings.sol#L13), this is used to create new users and stake.
-2. Add this helper function, addUsersMinStake(), which creates new users and stake the `MIN_STAKE`
+Please copy and paste this in LayerEdgeStakingTest.t.sol. Please run with an increased gas limit - forge test -vvvv --mt test_audit_gas_bomb --gas-limit 1000000000000
 
 ```solidity
-import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+function test_audit_gas_bomb() public {
+    // NOTE must be run with high gas limit
+    // forge test -vvvv --mt test_audit_gas_bomb --gas-limit 1000000000000
+    address attacker = makeAddr("attackerAttacker");
+    vm.startPrank(admin);
+    token.transfer(attacker, MIN_STAKE * 10000);
 
-contract TierBoundaryAndInterestTest is Test {
-    
-    function addUsersMinStake(uint256 num) public {     
-        for (uint256 i = 1; i < num; i++) { //starts from 1 so that first staker appears as `user1` in logs.
-            address[] memory users = new address[](num);
-            users[i] = makeAddr(Strings.toString(i));
-            dealToken(users[i], MIN_STAKE);
-            vm.prank(users[i]);
-            staking.stake(MIN_STAKE); 
-        }}
-```
+    setupMultipleStakers(9);
 
-This is a test showing how alice the 7th staker(U7), is moved to Tier 2 only after a new user staked and stayed in Tier 2 althoough stakers after her unstaked. She is getting APY of TIer 2.
+    vm.startPrank(attacker);
+    token.approve(address(staking), type(uint256).max);
 
-```solidity
-    function test_permenantTier() public {
-        addUsersMinStake(7); //Add 6 stakers in front of Alice 
-        address[10] memory users = [alice, bob, charlie, dave, eve, frank, grace, heidi, ivan, judy];
-
-        //Alice is the 7th staker
-        for (uint256 i = 0; i < 9; i++) {
-            dealToken(users[i], MIN_STAKE);
-            vm.prank(users[i]);
-            staking.stake(MIN_STAKE);
-        }
-
-        //15 stakers, so Alice(7th staker) SHOULD BE in Tier 2
-        assertEq(staking.stakerCountInTree(), 15);
-
-        //NOTE this returns the SHOULD BE tier. In reality Alice has NOT been moved to Tier 2.
-        LayerEdgeStaking.Tier tier = staking.getCurrentTier(alice);
-        assert(tier == LayerEdgeStaking.Tier.Tier2);
-
-        //Alice history length is still 1, she has NOT been moved to Tier 1
-        uint256 aliceHistory = staking.stakerTierHistoryLength(alice);
-        assertEq(aliceHistory, 1);
-        
-        //Judy stakes, she is the 16th staker
-        dealToken(judy, MIN_STAKE);
-        vm.prank(judy);
+    for (uint256 i; i < 6000; i++) {
+        address puppet = makeAddr(vm.toString(100001 + i));
+        vm.startPrank(attacker);
+        token.transfer(puppet, MIN_STAKE);
+        vm.startPrank(puppet);
+        token.approve(address(staking), MIN_STAKE);
         staking.stake(MIN_STAKE);
-
-        //Alice history length is now 2, 1 from staking, one from Tier3 -> Tier2
-        aliceHistory = staking.stakerTierHistoryLength(alice);
-        console2.log("Alice History Length", aliceHistory);
-        assertEq(aliceHistory, 2);
-
-        //Every that stakes after alice unstakes. U16-U8
-        for (uint256 i = 9; i > 0; i--) {
-            vm.prank(users[i]);
-            staking.unstake(MIN_STAKE);
-        }
-        //Alice is not demoted back to Tier3. With this history, she will get Tier2 APY. 
-        aliceHistory = staking.stakerTierHistoryLength(alice);
-        console2.log("Alice History Length", aliceHistory);
-        assertEq(aliceHistory, 2);
-
-        //Alice is getting Tier 2 APY
-        skip(365 days); //1 year later, 35 % interest
-        uint256 aliceInterest = staking.calculateUnclaimedInterest(alice);
-        console2.log("Alice Interest", aliceInterest);
-        assertEq(aliceInterest, (MIN_STAKE * 35) / 100);
+        staking.unstake(MIN_STAKE);
     }
-```
 
-NOTE : the [getCurrentTier()](https://github.com/sherlock-audit/2025-05-layeredge/blob/main/edgen-staking/src/stake/LayerEdgeStaking.sol#L355) returns the correct Tier of the user despite their history. i.e The function will return Alice's Tier as 2 before Judy stakes, but in reality Alice still has a history length of 1, meaning her history has not yet been updated. This can be seen in the logs as well.
-After all the users who staked after alice unstaked, she has not be demoted to Tier3 (historyLength == 2). If she has been demoted to Tier 3, she should have a history length of 3.
-
-This is a POC showing the mitigation correctly updated Alice's history. Run this after applying the mitigation.
-
-```solidity
-    function test_permenantTierMitigation() public {
-        addUsersMinStake(7); //Add 6 stakers in front of Alice 
-        address[10] memory users = [alice, bob, charlie, dave, eve, frank, grace, heidi, ivan, judy];
-
-        //Alice is the 7th staker
-        for (uint256 i = 0; i < 9; i++) {
-            dealToken(users[i], MIN_STAKE);
-            vm.prank(users[i]);
-            staking.stake(MIN_STAKE);
-        }
-        
-        //15 stakers, so Alice(7th staker) SHOULD BE in Tier 2
-        assertEq(staking.stakerCountInTree(), 15);
-        LayerEdgeStaking.Tier tier = staking.getCurrentTier(alice);
-        assert(tier == LayerEdgeStaking.Tier.Tier2);
-        //Alice history length is 2, she has be promoted to Tier 2.
-        uint256 aliceHistory = staking.stakerTierHistoryLength(alice);
-        assertEq(aliceHistory, 2);
-        
-        //Alice was correctly promoted to Tier 2 when the 15th Staker(ivan) staked.
-        //Judy stakes, she is the 16th staker
-        dealToken(judy, MIN_STAKE);
-        vm.prank(judy);
-        staking.stake(MIN_STAKE);
-
-        //Every that stakes after alice unstakes. U16-U8
-        for (uint256 i = 9; i > 0; i--) {
-            vm.prank(users[i]);
-            staking.unstake(MIN_STAKE);
-        }
-        //Alice is demoted back to Tier3.
-        aliceHistory = staking.stakerTierHistoryLength(alice);
-        console2.log("Alice History Length", aliceHistory);
-        assertEq(aliceHistory, 3);
-
-        skip(365 days); //1 year later, 20% interest
-        uint256 aliceInterest = staking.calculateUnclaimedInterest(alice);
-        console2.log("Alice Interest", aliceInterest);
-        assertEq(aliceInterest, (MIN_STAKE * 20) / 100);
-    }
+    // bob's user history has been appended to so many times that he can't function
+    // any function he calls will revert because calculateUnclaimedInterest will take 45M gas
+    uint256 gasBefore = gasleft();
+    staking.getAllInfoOfUser(bob);
+    uint256 gasAfter = gasleft();
+    uint256 gasSpent = gasBefore - gasAfter;
+    console2.log(gasSpent); // according to the log, 87M gas spent, according to the trace, 45M
+    // either way, too much for bob to be able to do anything, his stake is stuck
+}
 ```
 
 ### Mitigation
 
-Flip the conditions in _checkBoundariesAndRecord().
-
-```diff
-    function _checkBoundariesAndRecord(bool isRemoval) internal {
-        ....
-            //Handle case where Tier 2 count stays the same
--           else if (isRemoval) {
-+           else if (!isRemoval) {
-                _findAndRecordTierChange(new_t1 + new_t2, n);
--           } else if (!isRemoval) {
-+           } else if (isRemoval) {
-                _findAndRecordTierChange(old_t1 + old_t2, n);
-            }
-        }
-    }
-```
-
+Consider storing a starting index for users so that the function doesn't iterate through every item every time. This would make it so that although the DOS is possible, as long as the user calls any function on the protocol every now and then the gas would remain within bounds. Currently, the whole thing is iterated over every time which given sufficient user activity can cause problems. Alternatively, allow users to collect interest with a function that processes n amount of tier changes so that the process can be broken into smaller transactions.
 
